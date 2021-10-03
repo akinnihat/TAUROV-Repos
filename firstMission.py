@@ -1,0 +1,280 @@
+import cv2
+import numpy as np
+import time
+from pymavlink import mavutil
+import imutils
+import threading
+from brping import Ping1D
+
+xC = False
+foundRect = False
+endOfMission = False
+directionCounter = 1
+x, y, w, h = 0, 0, 0, 0
+exit_event_detect = threading.Event()
+exit_event_search = threading.Event()
+exit_event_horizontal = threading.Event()
+
+mtx = [303.26103924, 0, 330.07840914,
+       0, 302.17815631, 241.76844028,
+       0,     0     ,       1        ]
+
+mtx = np.array(mtx)
+mtx = mtx.reshape((3,3))
+
+dist = [-0.33920992, 0.12270265, 0.00046082, -0.00203071, -0.02049525]
+
+dist = np.array(dist)
+dist = dist.reshape((1,5))
+
+low_yellow = np.array([10, 60, 0]) 
+high_yellow= np.array([80, 255, 255])
+
+class auvThreads(threading.Thread):
+    def __init__(self, x, y, w, h, foundRect, endOfMission, directionCounter, xC):
+        threading.Thread.__init__(self)
+        self.x = x
+        self.y = y
+        self.w = w
+        self.h = h
+        self.foundRect = foundRect
+        self.endOfMission = endOfMission
+        self.directionCounter = directionCounter
+        self.xC = xC
+        self.lock = threading.Lock()
+        self.event_found_rect = threading.Event()
+        self.event_stop = threading.Event()
+        detect = threading.Thread(target=self.detectRect, args=(self.event_found_rect,))
+        search = threading.Thread(target=self.searchRect, args=(self.event_found_rect, self.event_stop,))
+        horizontal = threading.Thread(target=self.horizontal, args=(self.event_found_rect, self.event_stop,))
+        detect.start()
+        search.start()
+        horizontal.start()
+        detect.join()
+        search.join()
+        horizontal.join()
+
+    def detectRect(self, event_found_rect):
+        while endOfMission == False:
+            
+            if exit_event_detect.is_set():
+                break
+            
+            _, frame = cap.read()
+            frame = cv2.resize(frame, (640, 480))
+            frame = imutils.rotate(frame, angle=180)
+
+            newcameramtx, _ = cv2.getOptimalNewCameraMatrix(mtx, dist, (640,480), 1, (640,480))
+            dst = cv2.undistort(frame, mtx, dist, newcameramtx)
+            #dst = cv2.addWeighted(dst, 1, np.zeros(dst.shape, dst.dtype), 0, 16)
+            
+            hsv_frame = cv2.cvtColor(dst, cv2.COLOR_BGR2HSV)
+
+            yellow_mask = cv2.inRange(hsv_frame, low_yellow, high_yellow)
+            yellow = cv2.bitwise_and(dst, dst, mask = yellow_mask)
+
+            frameCanny = cv2.Canny(yellow, 100, 230) 
+            kernel = np.ones((5, 5))
+            frameDilate = cv2.dilate(frameCanny, kernel, iterations=2)
+            
+            try:
+                self.x, self.y, self.w, self.h = getContours(frameDilate, yellow)
+                print("Info:", self.x, self.y, self.w, self.h)
+                self.event_found_rect.set()
+            
+            except:
+                self.x, self.y, self.w, self.h = 0, 0, 0, 0
+                self.foundRect = False
+                print("0, 0, 0, 0")
+                try:                    
+                    self.event_found_rect.clear()
+                    self.lock.release()
+                except: pass
+                
+            #cv2.imshow("Yellow", yellow)
+            #out.write(yellow)
+
+        self.endOfMission = True
+        out.release()
+        cap.release()
+        disarmAuv()
+
+        cv2.destroyAllWindows()
+        
+        exit_event_search.set()
+        exit_event_horizontal.set()
+        exit_event_detect.set()
+        
+    def searchRect(self, event_found_rect, event_stop):
+        
+        while endOfMission == False:
+            if self.event_stop.is_set():
+                break
+            if not self.event_found_rect.is_set():
+                time.sleep(0.25)
+                sonarSensor(self.directionCounter)
+                if not self.event_found_rect.is_set():
+                    if self.directionCounter == 0:
+                        self.directionCounter = 1
+                        for i in range(5):
+                            sonarSensor(self.directionCounter)
+                            time.sleep(0.15)
+                            if not self.event_found_rect.is_set():
+                                set_rc_channel_pwm(4, 1620)
+                                print("Go To Right: Search")
+                            else: break
+                            
+                        for i in range(10):
+                            sonarSensor(self.directionCounter)
+                            time.sleep(0.15)
+                            if not self.event_found_rect.is_set():
+                                set_rc_channel_pwm(5, 1750)
+                            else: break   
+                        
+                    elif self.directionCounter == 1:
+                        self.directionCounter = 0
+                        for i in range(10):
+                            sonarSensor(self.directionCounter)
+                            time.sleep(0.15)
+                            if not self.event_found_rect.is_set():
+                                set_rc_channel_pwm(4, 1370)
+                                print("Go To Left: Search")
+                            else: break
+                            
+                        for i in range(10):
+                            sonarSensor(self.directionCounter)
+                            time.sleep(0.15)    
+                            if not self.event_found_rect.is_set():
+                                set_rc_channel_pwm(5, 1750)
+                            else: break   
+                    else: pass
+
+                    if exit_event_search.is_set():
+                        print("Locked On Target")
+                        break
+                    else: self.lock.acquire()
+                else: pass                
+            
+    def horizontal(self, event_found_rect, event_stop):
+        while endOfMission == False:
+            time.sleep(0.01)
+            if self.event_found_rect.is_set():
+                print("Area:", self.w*self.h)
+                if exit_event_horizontal.is_set():
+                    print("Horizontal: Set")
+                    break
+                    
+                if 0 < self.x < 270:
+                    set_rc_channel_pwm(6, 1400) 
+                    print("Go Left: Target")                               
+                elif 270 < self.x < 370:
+                    set_rc_channel_pwm(5, 1650)
+                    print("Forward: Target")
+                elif self.x > 370:
+                    set_rc_channel_pwm(6, 1600)
+                    print("Go Right: Target")
+                else: pass
+                if self.w*self.h >= 80000:
+                    self.event_stop.set()
+                    print("endOfMission")
+                    set_rc_channel_pwm(3, 1100)
+                    time.sleep(3)
+                    set_rc_channel_pwm(5, 1700)
+                    time.sleep(12)
+                    out.release()
+                    cap.release()
+ 
+def getContours(frame, frameContour):
+    
+    contours, _ = cv2.findContours(frame, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    areaMin = 1250
+    epsilonValue  = 0.1
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area > areaMin:
+            
+            epsilon = epsilonValue*cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, epsilon, True)
+            approx.ravel()
+            x1, y1, w1, h1 = cv2.boundingRect(approx)
+            if len(approx) >= 4:
+                cv2.rectangle(frameContour, (x1, y1), (x1 + w1, y1 + h1), (0, 255, 0), 5) 
+                centerX = x1+int(w1/2)
+                centerY = y1+int(h1/2)
+                cv2.circle(frameContour, (centerX, centerY), 2, (0, 255, 0), 4) 
+                cv2.putText(frameContour, "Rectangle", (x1 + w1 + 20, y1 + h1 + 20), cv2.FONT_HERSHEY_COMPLEX, .7,
+                    (255, 0, 0), 1)
+                coordinateList = [centerX, centerY, w1, h1]
+                return coordinateList
+    
+# -------------------------------------------
+
+def armAuv():
+    master.mav.command_long_send(
+    master.target_system,
+    master.target_component,
+    mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+    0,
+    1, 0, 0, 0, 0, 0, 0)
+    
+def disarmAuv():
+    master.mav.command_long_send(
+    master.target_system,
+    master.target_component,
+    mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+    0,
+    0, 0, 0, 0, 0, 0, 0)
+
+def resetPWMs():
+    for i in range(1, 6):
+        set_rc_channel_pwm(i, 1500)
+
+def set_rc_channel_pwm(channel_id, pwm=1500):
+
+    rc_channel_values = [1500 for _ in range(8)]
+
+    rc_channel_values[channel_id - 1] = pwm
+    master.mav.rc_channels_override_send(
+        master.target_system,                # target_system
+        master.target_component,             # target_component
+        *rc_channel_values)
+
+def sonarSensor(direction):
+    data = myPing.get_distance()
+    if data:
+        print("Distance: %s\tConfidence: %s%%" % (data["distance"], data["confidence"]))
+    else:
+        print("Failed to get distance data.")   
+    if data["distance"] <= 1000:
+        while True:
+            data = myPing.get_distance()
+            if direction == 0:
+                set_rc_channel_pwm(4, 1620)
+            elif direction == 1:
+                set_rc_channel_pwm(4, 1480)
+            if data["distance"] > 5000:
+               break
+
+# -------------------------------------------
+
+try:
+    cap = cv2.VideoCapture(0) 
+    fourcc = cv2.VideoWriter_fourcc('D','I','V','X')
+    out = cv2.VideoWriter('uwOutput.avi', fourcc, 30, (640, 480), isColor=True)
+    master = mavutil.mavlink_connection("/dev/ttyAMA0", baud=57600)
+    myPing = Ping1D()
+    myPing.connect_serial("/dev/ttyUSB0", 115200)
+    if myPing.initialize() is False:
+        print("Failed to initialize Ping.")
+        
+    disarmAuv()
+    time.sleep(40)
+    armAuv()
+    executeMission = auvThreads(x, y, w, h, foundRect, endOfMission, directionCounter, xC)
+    executeMission.start()
+    
+except KeyboardInterrupt:
+    out.release()
+    cap.release()
+    disarmAuv()
+    cv2.destroyAllWindows()
