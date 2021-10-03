@@ -45,27 +45,27 @@ armAuv()
 resetPWMs()
 time.sleep(40)
 
-set_rc_channel_pwm(3, 1150) # irtifa
+set_rc_channel_pwm(3, 1150) # Throttle
 
 time.sleep(6)
 
-set_rc_channel_pwm(5, 1700) # ileri
+set_rc_channel_pwm(5, 1700) # Forward
 
 time.sleep(11)
 
-set_rc_channel_pwm(5, 1500)
+set_rc_channel_pwm(5, 1500) # Stop
 
 time.sleep(4)
 
-set_rc_channel_pwm(4, 1300) # 360
+set_rc_channel_pwm(4, 1300) # Yaw
 
 time.sleep(6)
 
-set_rc_channel_pwm(4, 1700) # 360
+set_rc_channel_pwm(4, 1700) # Yaw
 
 time.sleep(6)
 
-while True: # acil durdurma buton test
+while True: # Emergency stop button test
     set_rc_channel_pwm(5, 1650)
     
 resetPWMs()
